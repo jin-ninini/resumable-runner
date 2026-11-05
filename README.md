@@ -1,142 +1,132 @@
-# resumable-runner
+# 🔁 resumable-runner
+
+> Python library and CLI that runs a function over many items, survives interruptions, and resumes where it stopped.
 
 [![CI](https://github.com/jin-ninini/resumable-runner/actions/workflows/ci.yml/badge.svg)](https://github.com/jin-ninini/resumable-runner/actions/workflows/ci.yml)
 
-Run a Python function over many items. Stop any time, rerun the same command, and it picks up where it left off.
+<br>
 
-```bash
-resumable run examples/tasks.py:fetch_title --input examples/urls.csv --min-interval 1
+## Overview
+
+Collecting place, menu and review data for hundreds of thousands of outlets during a data internship, a plain crawling loop kept failing the same way: a crash meant starting over, every script reinvented retry logic, and a blocked site produced thousands of failures in a row. resumable-runner turns the cache, resume, retry and status tracking I built inside that project into a small, dependency-free tool that any batch job can reuse. It contains no company code or data.
+
+<br>
+
+## Approach
+
+- **State**: Stores every item in one SQLite file and commits each status change (`pending → running → done / failed`) immediately
+- **Resume**: Returns items left `running` by a crash or Ctrl+C to `pending` on the next run and skips items already `done`
+- **Retry**: Retries failed attempts with exponential backoff (`RetryPolicy`: attempts, base delay, cap)
+- **Throttle**: Keeps a minimum interval between calls for polite crawling and API rate limits
+- **Circuit Breaker**: Stops the run after N failed items in a row and leaves untouched items `pending`
+- **Interface**: Exposes `run / status / retry / export` commands with `--json` output and fixed exit codes, so scripts, CI jobs and LLM agents can drive it
+
+<br>
+
+## Results
+
+| Check | Tool | Result |
+|---|---|---|
+| Unit and CLI tests | pytest | 52 passed |
+| Coverage | pytest-cov | 97% |
+| Type check | mypy (strict) | No issues |
+| Lint and format | Ruff | No issues |
+| CI | GitHub Actions | Ubuntu and Windows, Python 3.11 to 3.13 |
+
+- Rerunning the same command adds no items and skips finished work, verified by `test_rerun_skips_finished_items`
+- An interrupted item is picked up again on the next run, verified by `test_resumes_after_interruption`
+- Backoff and throttling are tested with a fake clock, so the whole suite runs in about 2 seconds
+
+<br>
+
+## Tech Stack
+
+| Category | Stack |
+|---|---|
+| Languages | ![Python](https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white) |
+| Database | ![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white) |
+| Testing & Quality | ![pytest](https://img.shields.io/badge/pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white)  ![Ruff](https://img.shields.io/badge/Ruff-D7FF64?style=flat-square&logo=ruff&logoColor=black)  ![mypy](https://img.shields.io/badge/mypy-2A6DB2?style=flat-square&logoColor=white) |
+| Development & Environment | ![Git](https://img.shields.io/badge/Git-F05032?style=flat-square&logo=git&logoColor=white)  ![GitHub](https://img.shields.io/badge/GitHub-181717?style=flat-square&logo=github&logoColor=white)  ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-2088FF?style=flat-square&logo=githubactions&logoColor=white)  ![uv](https://img.shields.io/badge/uv-DE5FE9?style=flat-square&logo=uv&logoColor=white) |
+
+<br>
+
+## Project Structure
+
+```text
+resumable-runner/
+├── src/resumable/
+│   ├── store.py        # SQLite item state: pending, running, done, failed
+│   ├── runner.py       # Retry, backoff, throttling and circuit breaker loop
+│   ├── retry.py        # RetryPolicy: attempts and exponential backoff
+│   ├── loader.py       # Loads module:function tasks and .csv/.jsonl/.txt inputs
+│   └── cli.py          # run, status, retry and export commands
+├── tests/              # pytest suite with a fake clock for time-based behavior
+├── examples/           # Sample tasks and input files
+├── docs/
+│   ├── cli.md          # Every option and JSON output shape
+│   └── design.md       # Design decisions and rejected alternatives
+├── .github/workflows/
+│   └── ci.yml          # Lint, type check and tests on every push
+├── llms.txt            # Short tool summary for LLM agents
+├── pyproject.toml
+└── README.md
 ```
 
-## Why this exists
+<br>
 
-During a data internship I collected place, menu and review data for hundreds of thousands of outlets. A plain loop kept breaking the same way:
+## Getting Started
 
-- **A crash meant starting over.** Hours of finished requests were lost or had to be redone.
-- **Retry logic leaked into every script.** Each crawler reinvented backoff, failure lists and "where was I?" files.
-- **Blocking went unnoticed.** When a site started refusing requests, the loop kept failing thousands of items in a row.
-
-I solved this inside that project with a match cache, saved stages, retries and status tracking. This repository rebuilds the pattern from scratch as a small, dependency-free library and CLI, so any batch job gets it for free. No company code or data is included.
-
-## Install
-
-Requires Python 3.11+. No runtime dependencies.
+Requires Python 3.11+ and has no runtime dependencies.
 
 ```bash
 pip install git+https://github.com/jin-ninini/resumable-runner
-# or, for development
-git clone https://github.com/jin-ninini/resumable-runner && cd resumable-runner
-uv sync
+resumable run examples/tasks.py:word_stats --input examples/items.csv
+resumable status
+resumable retry
+resumable export --status done -o results.jsonl
 ```
 
-## Quick start
-
-1. Write a task: a function that takes one item (a `dict`) and returns something JSON-serializable, or raises.
-
-   ```python
-   # tasks.py
-   def word_stats(item):
-       word = item["word"]
-       return {"letters": len(word)}
-   ```
-
-2. Run it over a file of items. `--key` names the column that identifies each item (default `id`).
-
-   ```bash
-   resumable run tasks.py:word_stats --input examples/items.csv
-   # added 5, processed 5: 5 done, 0 failed, 0 skipped (already done)
-   ```
-
-3. Interrupt it, rerun it, inspect it.
-
-   ```bash
-   resumable run tasks.py:word_stats --input examples/items.csv   # done items are skipped
-   resumable status                                               # counts + recent failures
-   resumable retry && resumable run tasks.py:word_stats           # give failed items another go
-   resumable export --status done -o results.jsonl                # collect results
-   ```
-
-Progress lives in one SQLite file (`.resumable.db` by default, change it with `--state`).
-
-### As a library
+A task is a function that takes one item (a `dict`) and returns a JSON-serializable result, or raises.
 
 ```python
-from resumable import RetryPolicy, Runner, Store
-
-with Store("crawl.db") as store:
-    store.add((row["id"], row) for row in rows)  # existing keys are ignored
-    report = Runner(
-        store,
-        fetch_place,
-        RetryPolicy(max_attempts=5, base_delay=2),
-        min_interval=0.5,
-        max_consecutive_failures=20,
-    ).run()
-print(report.as_dict())
+def word_stats(item):
+    return {"letters": len(item["word"])}
 ```
-
-## CLI reference
 
 | Command | What it does |
 |---|---|
-| `resumable run TASK [--input FILE]` | Add new items from FILE (if given), then process every pending item |
-| `resumable status` | Item counts by status and the first failures |
-| `resumable retry` | Move failed items back to pending |
-| `resumable export [--status S] [-o FILE]` | Write items with results and errors as JSON lines |
+| `resumable run TASK [--input FILE]` | Adds new items from FILE, then processes every pending item |
+| `resumable status` | Shows item counts by status and the first failures |
+| `resumable retry` | Moves failed items back to pending |
+| `resumable export [--status S] [-o FILE]` | Writes items with results and errors as JSON lines |
 
-Every command takes `--state FILE` and `--json`. Exit codes: `0` nothing left to do, `1` failed or unfinished items remain, `2` bad arguments or unreadable input. Full options: [docs/cli.md](docs/cli.md).
+- Every command takes `--state FILE` (default `.resumable.db`) and `--json`
+- Exit codes: `0` nothing left to do, `1` failed or unfinished items remain, `2` bad arguments or unreadable input
+- Run options such as `--max-attempts`, `--min-interval` and `--max-consecutive-failures` are listed in [docs/cli.md](docs/cli.md)
 
-`--json` and the exit codes are there so shell scripts, CI jobs and LLM agents can drive the tool without parsing human text. [llms.txt](llms.txt) is a short summary written for LLMs.
-
-## Architecture
-
-```
-input file ──► loader ──► Store (SQLite) ◄──► Runner ──► your task(item)
- .csv/.jsonl/.txt         one row per item        retry, backoff,
-                          status, attempts,       throttle, breaker
-                          error, result
-```
-
-| Module | Responsibility |
-|---|---|
-| [`store.py`](src/resumable/store.py) | Item state machine `pending → running → done / failed`, committed on every change |
-| [`runner.py`](src/resumable/runner.py) | Loops over pending items, retries with backoff, throttles calls, stops on a failure streak |
-| [`retry.py`](src/resumable/retry.py) | `RetryPolicy`: attempts and exponential backoff |
-| [`loader.py`](src/resumable/loader.py) | Resolves `module:function` / `file.py:function` and reads input files |
-| [`cli.py`](src/resumable/cli.py) | Thin argparse layer over the library |
-
-## Configuration
-
-| Option | Default | Meaning |
-|---|---|---|
-| `--max-attempts` | 3 | Tries per item, counting the first |
-| `--base-delay` / `--max-delay` | 1s / 30s | Backoff doubles from base up to max |
-| `--min-interval` | 0 | Minimum seconds between task calls, for polite crawling |
-| `--max-consecutive-failures` | off | Stop the run after N failed items in a row |
-| `--limit` | off | Process at most N items, handy for a dry run |
-
-## Testing
+For development:
 
 ```bash
-uv run pytest           # unit and CLI tests, with coverage
-uv run ruff check .     # lint
+git clone https://github.com/jin-ninini/resumable-runner && cd resumable-runner
+uv sync
+uv run pytest
+uv run ruff check .
 uv run ruff format --check .
-uv run mypy             # strict type check of src/
+uv run mypy
 ```
 
-CI runs all four on Ubuntu and Windows with Python 3.11, 3.12 and 3.13, then smoke-tests the CLI. Time-based behavior (backoff, throttling) is tested with a fake clock, so the suite never sleeps.
+<br>
 
-## Design decisions
+## Notes
 
-Short version below. Reasons and rejected alternatives are in [docs/design.md](docs/design.md).
+- SQLite replaces a JSON progress file because one committed transaction per status change cannot be corrupted by a crash
+- Items run sequentially on purpose: remote rate limits are the bottleneck, and one writer keeps the state simple
+- Duplicate keys in one input file are rejected, since they usually point to an upstream join or export bug
+- Future improvements: parallel workers over separate state files, and per-item timeouts
+- Full reasoning for each decision is in [docs/design.md](docs/design.md)
 
-- **SQLite, not a JSON progress file.** Every status change is one committed transaction, so Ctrl+C or a crash can never corrupt progress.
-- **Items left `running` are recovered on the next start.** An interrupted item is simply tried again.
-- **Adding input is idempotent.** Rerunning with the same file never duplicates work, and duplicate keys inside one file are rejected loudly.
-- **Sequential by design.** Rate limits on the remote side are the bottleneck for crawling and API jobs. One writer keeps the state simple and correct.
-- **A circuit breaker instead of silent failure.** `--max-consecutive-failures` stops the run when a site starts blocking you, leaving untouched items pending for later.
-- **Standard library only.** Nothing to install beyond Python, which keeps the tool easy to drop into any environment.
+<br>
 
 ## License
 
-MIT
+MIT License. Copyright © 2026 Hyunjin Hwang. See [LICENSE](LICENSE).
