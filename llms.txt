@@ -1,0 +1,31 @@
+# resumable-runner
+
+> Python library and CLI (`resumable`) that runs a function over many items, records each item's state in SQLite, and resumes after interruption. Standard library only, Python 3.11+.
+
+## Use it when
+
+- A batch job (crawling, API calls, LLM labeling) is long enough that a crash or Ctrl+C would waste work.
+- You need retries with backoff, a minimum interval between calls, or a stop when too many items fail in a row.
+
+## Commands
+
+- `resumable run TASK --input FILE [--key id] [--max-attempts 3] [--min-interval 0] [--max-consecutive-failures N] [--limit N]`
+  TASK is `module:function` or `file.py:function`. The function gets one item as a dict and returns JSON-serializable data or raises.
+- `resumable status`: counts by status and recent failures
+- `resumable retry`: failed -> pending
+- `resumable export [--status done] [-o out.jsonl]`: one JSON object per item
+
+All commands: `--state FILE` (default `.resumable.db`) and `--json` for machine-readable output.
+Exit codes: 0 = nothing left, 1 = failed or pending items remain, 2 = usage or input error.
+
+## Typical agent loop
+
+1. `resumable run tasks.py:fetch --input items.csv --json`
+2. If exit code is 1: `resumable status --json`, inspect `failed[].error`, fix the task if needed.
+3. `resumable retry --json`, then repeat step 1 without `--input`.
+
+## Docs
+
+- [README](README.md): problem, quick start, architecture
+- [CLI reference](docs/cli.md): every option and the JSON output shapes
+- [Design decisions](docs/design.md): why SQLite, recovery, idempotent input, circuit breaker
